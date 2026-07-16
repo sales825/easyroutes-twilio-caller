@@ -124,7 +124,7 @@ app.post("/voice", function (req, res) {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say(
     { voice: "alice" },
-    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Thank you!"
+    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. Thank you!"
   );
   res.type("text/xml");
   res.send(twiml.toString());
