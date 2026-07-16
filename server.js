@@ -21,6 +21,11 @@ const {
 
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
+// The voice used for the outbound call. Google neural voice = modern, natural.
+// Fallbacks if unavailable on the account: "Polly.Joanna-Neural" or "alice".
+const CALL_VOICE = "Google.en-US-Neural2-F";
+const CALL_LANGUAGE = "en-US";
+
 // Verify the HMAC signature EasyRoutes sends with each webhook.
 // EasyRoutes signs the raw request body with HMAC-SHA256 and sends it
 // base64-encoded in the X-EasyRoutes-Hmac-SHA256 header.
@@ -123,7 +128,7 @@ app.post("/easyroutes-webhook", async (req, res) => {
 app.post("/voice", function (req, res) {
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say(
-    { voice: "alice" },
+    { voice: CALL_VOICE, language: CALL_LANGUAGE },
     "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. Thank you!"
   );
   res.type("text/xml");
