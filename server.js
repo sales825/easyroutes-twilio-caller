@@ -26,6 +26,41 @@ const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 const CALL_VOICE = "Google.en-US-Neural2-F";
 const CALL_LANGUAGE = "en-US";
 
+// --- Anti-spam guards ------------------------------------------------------
+// Previously, every webhook (including EasyRoutes retries) re-called whoever
+// was currently the "next" stop, so one customer received 18 calls in about
+// 10 seconds. These guards make each stop callable exactly once.
+
+// Stop identifiers we have already placed a call for.
+const calledStops = new Set();
+// Phone number -> timestamp (ms) of the last call we placed to it.
+const recentlyCalled = new Map();
+// Never call the same number twice inside this window.
+const COOLDOWN_MS = 10 * 60 * 1000;
+// Webhook delivery IDs we have already processed (retry protection).
+const seenDeliveries = new Set();
+
+function stopId(s) {
+  return (
+    s.id ||
+    s.stopId ||
+    s._id ||
+    s.orderId ||
+    getPhone(s) ||
+    JSON.stringify(s).slice(0, 80)
+  );
+}
+
+// Keep the in-memory maps from growing without bound.
+function prune() {
+  const cutoff = Date.now() - COOLDOWN_MS;
+  for (const [phone, ts] of recentlyCalled) {
+    if (ts < cutoff) recentlyCalled.delete(phone);
+  }
+  if (calledStops.size > 5000) calledStops.clear();
+  if (seenDeliveries.size > 5000) seenDeliveries.clear();
+}
+
 // Verify the HMAC signature EasyRoutes sends with each webhook.
 // EasyRoutes signs the raw request body with HMAC-SHA256 and sends it
 // base64-encoded in the X-EasyRoutes-Hmac-SHA256 header.
@@ -70,12 +105,36 @@ async function callStop(stop) {
     console.log("No phone found for stop:", JSON.stringify(stop).slice(0, 400));
     return;
   }
-  await twilioClient.calls.create({
-    to: phone,
-    from: TWILIO_FROM_NUMBER,
-    url: PUBLIC_BASE_URL + "/voice",
-  });
-  console.log("Called next stop:", phone);
+
+  const id = stopId(stop);
+  if (calledStops.has(id)) {
+    console.log("Already called this stop, skipping:", id);
+    return;
+  }
+
+  const last = recentlyCalled.get(phone);
+  if (last && Date.now() - last < COOLDOWN_MS) {
+    console.log("Number called too recently, skipping:", phone);
+    return;
+  }
+
+  // Reserve BEFORE awaiting so overlapping webhooks cannot slip through.
+  calledStops.add(id);
+  recentlyCalled.set(phone, Date.now());
+
+  try {
+    await twilioClient.calls.create({
+      to: phone,
+      from: TWILIO_FROM_NUMBER,
+      url: PUBLIC_BASE_URL + "/voice",
+    });
+    console.log("Called next stop:", phone);
+  } catch (err) {
+    // Release the reservation so a genuine failure can be retried later.
+    calledStops.delete(id);
+    recentlyCalled.delete(phone);
+    console.error("Twilio call failed for", phone, err && err.message);
+  }
 }
 
 // Given the full route payload, find the next stop that still needs delivery
@@ -98,23 +157,41 @@ app.get("/", function (req, res) {
 });
 
 app.post("/easyroutes-webhook", async (req, res) => {
+  // Acknowledge immediately so EasyRoutes does not retry the delivery.
   res.sendStatus(200);
 
   console.log("=== WEBHOOK RECEIVED ===");
-  console.log("Topic:", req.get("X-EasyRoutes-Topic") || req.body.topic);
+  const topic = req.get("X-EasyRoutes-Topic") || (req.body && req.body.topic);
+  console.log("Topic:", topic);
 
   if (!verifySignature(req)) {
+    // Still non-blocking. Change this to a return once you have confirmed
+    // in the Render logs that signatures validate correctly.
     console.log("Signature verification FAILED - proceeding anyway (test mode)");
   }
 
+  // Drop duplicate deliveries of the same webhook.
+  const deliveryId =
+    req.get("X-EasyRoutes-Delivery-Id") || req.get("X-Shopify-Webhook-Id");
+  if (deliveryId) {
+    if (seenDeliveries.has(deliveryId)) {
+      console.log("Duplicate webhook delivery, ignoring:", deliveryId);
+      return;
+    }
+    seenDeliveries.add(deliveryId);
+  }
+
+  prune();
+
   try {
     const event = req.body;
-    const topic = event.topic || req.get("X-EasyRoutes-Topic");
     const route = event.payload || event.route || event;
 
-    if (topic === "STOP_STATUS_UPDATED") {
-      await callNextStop(route);
-    } else if (topic === "ROUTE_STARTED" || topic === "ROUTE_DISPATCHED") {
+    if (
+      topic === "STOP_STATUS_UPDATED" ||
+      topic === "ROUTE_STARTED" ||
+      topic === "ROUTE_DISPATCHED"
+    ) {
       await callNextStop(route);
     } else {
       console.log("Unhandled topic:", topic);
