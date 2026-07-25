@@ -344,6 +344,34 @@ function spellOut(text) {
     .join(" ");
 }
 
+// Staff can flag an order as same-day just by typing "sameday" (or "same day" /
+// "same-day") in the order notes, tags, note attributes or line item properties.
+function hasSameDayKeyword(order) {
+  const parts = [order.note, order.tags];
+
+  const attrs = Array.isArray(order.note_attributes) ? order.note_attributes : [];
+  for (const a of attrs) {
+    if (a) {
+      parts.push(a.name);
+      parts.push(a.value);
+    }
+  }
+
+  const items = Array.isArray(order.line_items) ? order.line_items : [];
+  for (const item of items) {
+    const props = item && Array.isArray(item.properties) ? item.properties : [];
+    for (const p of props) {
+      if (p) {
+        parts.push(p.name);
+        parts.push(p.value);
+      }
+    }
+  }
+
+  const blob = parts.filter(Boolean).map(String).join(" | ").toLowerCase();
+  return /same[\s\-_]*day/.test(blob);
+}
+
 app.post("/shopify-order", async (req, res) => {
   // Acknowledge immediately so Shopify does not retry the delivery.
   res.sendStatus(200);
@@ -363,10 +391,19 @@ app.post("/shopify-order", async (req, res) => {
       wantedOn
     );
 
-    if (!wantedOn || wantedOn !== placedOn) {
+    const byKeyword = hasSameDayKeyword(order);
+    const byDate = Boolean(wantedOn) && wantedOn === placedOn;
+
+    if (!byDate && !byKeyword) {
       console.log("Not a same-day order, no alert.");
       return;
     }
+
+    console.log(
+      "Same-day trigger ->",
+      byDate ? "requested date" : "",
+      byKeyword ? "keyword" : ""
+    );
 
     const key = String(order.id || orderName);
     if (sameDayAlerted.has(key)) {
