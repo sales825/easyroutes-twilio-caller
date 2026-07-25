@@ -20,6 +20,7 @@ const {
   EASYROUTES_WEBHOOK_SECRET,
   PUBLIC_BASE_URL,
   TEAM_PHONE,
+  ALERT_PHONE,
   PORT = 3000,
 } = process.env;
 
@@ -276,6 +277,138 @@ app.post("/keypress", function (req, res) {
   twiml.hangup();
   res.type("text/xml");
   res.send(twiml.toString());
+});
+
+// ---- Same-day order alerts -------------------------------------------
+// Shopify (Zapiet) writes the chosen delivery or pickup date into the
+// order's note attributes. If that date matches the day the order was
+// placed, it is a same-day order and we phone the alert line.
+
+const sameDayAlerted = new Set();
+
+function noteAttr(order, wanted) {
+  const list = (order && order.note_attributes) || [];
+  for (const a of list) {
+    if (a && String(a.name).toLowerCase() === wanted) {
+      return String(a.value || "").trim();
+    }
+  }
+  return "";
+}
+
+// Accepts 2026/07/25 or 2026-7-5 and returns 2026-07-25.
+function isoDay(value) {
+  const m = String(value || "").match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+  if (!m) return "";
+  return m[1] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[3]).slice(-2);
+}
+
+// The calendar day in Toronto, so late-evening orders are judged locally.
+function torontoDay(value) {
+  const d = value ? new Date(value) : new Date();
+  if (isNaN(d.getTime())) return "";
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Toronto",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+// The date the customer wants the order, from the note attributes, with the
+// _ZapietId line item property as a backup.
+function fulfillmentDay(order) {
+  const direct = isoDay(
+    noteAttr(order, "delivery-date") || noteAttr(order, "pickup-date")
+  );
+  if (direct) return direct;
+
+  const items = (order && order.line_items) || [];
+  for (const item of items) {
+    const props = (item && item.properties) || [];
+    for (const p of props) {
+      if (p && String(p.name) === "_ZapietId") {
+        const m = String(p.value || "").match(/D=(\d{4}-\d{2}-\d{2})/);
+        if (m) return m[1];
+      }
+    }
+  }
+  return "";
+}
+
+// "TOB59437" reads badly as a word, so spell it out character by character.
+function spellOut(text) {
+  return String(text || "")
+    .replace(/[^A-Za-z0-9]/g, "")
+    .split("")
+    .join(" ");
+}
+
+app.post("/shopify-order", async (req, res) => {
+  // Acknowledge immediately so Shopify does not retry the delivery.
+  res.sendStatus(200);
+
+  try {
+    const order = req.body || {};
+    const orderName = order.name || order.order_number || "";
+    const placedOn = torontoDay(order.created_at);
+    const wantedOn = fulfillmentDay(order);
+
+    console.log(
+      "=== SHOPIFY ORDER ===",
+      orderName,
+      "placed",
+      placedOn,
+      "wanted",
+      wantedOn
+    );
+
+    if (!wantedOn || wantedOn !== placedOn) {
+      console.log("Not a same-day order, no alert.");
+      return;
+    }
+
+    const key = String(order.id || orderName);
+    if (sameDayAlerted.has(key)) {
+      console.log("Already alerted for this order, skipping:", key);
+      return;
+    }
+    if (!ALERT_PHONE) {
+      console.error("Same-day order " + orderName + " but ALERT_PHONE is not set.");
+      return;
+    }
+
+    sameDayAlerted.add(key);
+    if (sameDayAlerted.size > 5000) sameDayAlerted.clear();
+
+    const spoken = spellOut(orderName);
+    const alert = new twilio.twiml.VoiceResponse();
+    alert.say(
+      { voice: CALL_VOICE, language: CALL_LANGUAGE },
+      "Hey, it's Summer, your A I assistant. You have a new same day order. " +
+        "Order number " + spoken + "."
+    );
+    alert.pause({ length: 1 });
+    alert.say(
+      { voice: CALL_VOICE, language: CALL_LANGUAGE },
+      "Again, that is order number " + spoken + ". Goodbye!"
+    );
+
+    try {
+      await twilioClient.calls.create({
+        to: ALERT_PHONE,
+        from: TWILIO_FROM_NUMBER,
+        twiml: alert.toString(),
+      });
+      console.log("Same-day alert placed for", orderName);
+    } catch (err) {
+      // Release so a genuine failure can be retried later.
+      sameDayAlerted.delete(key);
+      console.error("Same-day alert call failed:", err && err.message);
+    }
+  } catch (err) {
+    console.error("Error handling Shopify order:", err);
+  }
 });
 
 app.listen(PORT, function () {
