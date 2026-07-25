@@ -10,12 +10,16 @@ app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; },
 }));
 
+// Twilio posts form-encoded bodies (needed to read Digits from the keypad).
+app.use(express.urlencoded({ extended: false }));
+
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_FROM_NUMBER,
   EASYROUTES_WEBHOOK_SECRET,
   PUBLIC_BASE_URL,
+  DRIVER_PHONE,
   PORT = 3000,
 } = process.env;
 
@@ -204,10 +208,72 @@ app.post("/easyroutes-webhook", async (req, res) => {
 // TwiML for the outbound call: what the customer hears.
 app.post("/voice", function (req, res) {
   const twiml = new twilio.twiml.VoiceResponse();
+
+  // Give the customer a chance to press 1 and be patched through to the driver.
+  const gather = twiml.gather({
+    numDigits: 1,
+    timeout: 6,
+    action: "/keypress",
+    method: "POST",
+  });
+
+  gather.say(
+    { voice: CALL_VOICE, language: CALL_LANGUAGE },
+    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. If you would like to speak with your driver, press 1 now. Otherwise, we hope you love your balloons and have a very happy day!"
+  );
+
+  // Nothing pressed before the gather timed out: say goodbye and hang up.
   twiml.say(
     { voice: CALL_VOICE, language: CALL_LANGUAGE },
-    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. We hope you love your balloons and have a very happy day!"
+    "Thank you, and have a wonderful day. Goodbye!"
   );
+  twiml.hangup();
+
+  res.type("text/xml");
+  res.send(twiml.toString());
+});
+
+// The customer pressed a key during the delivery call.
+app.post("/keypress", function (req, res) {
+  const twiml = new twilio.twiml.VoiceResponse();
+  const digits = (req.body && req.body.Digits) || "";
+  const customer = (req.body && req.body.To) || "unknown";
+
+  if (digits === "1") {
+    if (!DRIVER_PHONE) {
+      console.error("Customer " + customer + " pressed 1 but DRIVER_PHONE is not set.");
+      twiml.say(
+        { voice: CALL_VOICE, language: CALL_LANGUAGE },
+        "Sorry, we are not able to connect you to the driver right now. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
+      );
+    } else {
+      console.log("Customer " + customer + " pressed 1 - connecting to driver.");
+      twiml.say(
+        { voice: CALL_VOICE, language: CALL_LANGUAGE },
+        "Connecting you to your driver now. Please hold."
+      );
+
+      const dial = twiml.dial({
+        callerId: TWILIO_FROM_NUMBER,
+        timeout: 25,
+        answerOnBridge: true,
+      });
+      dial.number(DRIVER_PHONE);
+
+      // Only reached if the driver did not answer or the call ended.
+      twiml.say(
+        { voice: CALL_VOICE, language: CALL_LANGUAGE },
+        "Sorry, your driver is not available at the moment, most likely because they are driving. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
+      );
+    }
+  } else {
+    twiml.say(
+      { voice: CALL_VOICE, language: CALL_LANGUAGE },
+      "Thank you, and have a wonderful day. Goodbye!"
+    );
+  }
+
+  twiml.hangup();
   res.type("text/xml");
   res.send(twiml.toString());
 });
