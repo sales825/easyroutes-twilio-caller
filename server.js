@@ -19,7 +19,7 @@ const {
   TWILIO_FROM_NUMBER,
   EASYROUTES_WEBHOOK_SECRET,
   PUBLIC_BASE_URL,
-  DRIVER_PHONE,
+  TEAM_PHONE,
   PORT = 3000,
 } = process.env;
 
@@ -209,7 +209,7 @@ app.post("/easyroutes-webhook", async (req, res) => {
 app.post("/voice", function (req, res) {
   const twiml = new twilio.twiml.VoiceResponse();
 
-  // Give the customer a chance to press 1 and be patched through to the driver.
+  // Give the customer a chance to press 1 and be patched through to our team.
   const gather = twiml.gather({
     numDigits: 1,
     timeout: 6,
@@ -219,7 +219,7 @@ app.post("/voice", function (req, res) {
 
   gather.say(
     { voice: CALL_VOICE, language: CALL_LANGUAGE },
-    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. If you would like to speak with your driver, press 1 now. Otherwise, we hope you love your balloons and have a very happy day!"
+    "Hello! This is a delivery update from T O Balloons. Your order is next on the route and the driver is on the way. Please check the tracking link we sent you by text message to see the driver's current position. If you would like to speak with a member of our team, press 1 now. Otherwise, we hope you love your balloons and have a very happy day!"
   );
 
   // Nothing pressed before the gather timed out: say goodbye and hang up.
@@ -240,17 +240,17 @@ app.post("/keypress", function (req, res) {
   const customer = (req.body && req.body.To) || "unknown";
 
   if (digits === "1") {
-    if (!DRIVER_PHONE) {
-      console.error("Customer " + customer + " pressed 1 but DRIVER_PHONE is not set.");
+    if (!TEAM_PHONE) {
+      console.error("Customer " + customer + " pressed 1 but TEAM_PHONE is not set.");
       twiml.say(
         { voice: CALL_VOICE, language: CALL_LANGUAGE },
-        "Sorry, we are not able to connect you to the driver right now. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
+        "Sorry, we are not able to connect you right now. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
       );
     } else {
-      console.log("Customer " + customer + " pressed 1 - connecting to driver.");
+      console.log("Customer " + customer + " pressed 1 - connecting to the team line.");
       twiml.say(
         { voice: CALL_VOICE, language: CALL_LANGUAGE },
-        "Connecting you to your driver now. Please hold."
+        "Connecting you to a member of our team now. Please hold."
       );
 
       const dial = twiml.dial({
@@ -258,12 +258,12 @@ app.post("/keypress", function (req, res) {
         timeout: 25,
         answerOnBridge: true,
       });
-      dial.number(DRIVER_PHONE);
+      dial.number(TEAM_PHONE);
 
-      // Only reached if the driver did not answer or the call ended.
+      // Only reached if nobody answered or the call ended.
       twiml.say(
         { voice: CALL_VOICE, language: CALL_LANGUAGE },
-        "Sorry, your driver is not available at the moment, most likely because they are driving. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
+        "Sorry, nobody is available to take your call right now. Please reply to the text message we sent you and we will get right back to you. Goodbye!"
       );
     }
   } else {
